@@ -142,7 +142,7 @@ void ms3_compute(unsigned *p)
 int libbitfury_selectChip(unsigned chip_num) {
   unsigned i;
   spi_clear_buf();
-  spi_emit_break();
+  spi_emit_break(); /* First we want to break chain! Otherwise we'll get all of traffic bounced to output */
   for (i = 1; i < chip_num; i++) {
     // should only use for small chain of chips
     // for long chain use spi_emit_fsync()
@@ -162,10 +162,10 @@ int libbitfury_detectChips(void) {
     unsigned w[16];
     libbitfury_selectChip(i);
     spi_emit_data(0x6000, (void*)osc6, 8); /* Program internal on-die slow oscillator frequency */
-    config_reg(7,0); config_reg(8,0); config_reg(9,0); config_reg(10,0); config_reg(11,0);
-    config_reg(6,1);
+    config_reg(7,0); config_reg(8,0); config_reg(9,0); config_reg(10,0); config_reg(11,0); /* Shut off scan chain COMPLETELY, all 5 should be disabled, but it is unfortunately that any of them will be PROGRAMMED anyway by default  */
+    config_reg(6,1); /* Propagate output to OUTCLK from internal clock to see clock generator performance, it can be measured on OUTCLK pin, and different clock programming methods (i.e. slow internal oscillator, fast internal oscillator, external oscillator, with clock divider turned on or off) can be verified and compared indirectly by using same output buffer. Signal to OUTCLK is taken from rather representative internal node, that is used to feed rounds (close to worst-case). */
     config_reg(4,1); /* Enable slow oscillator */
-    config_reg(1,0); config_reg(2,0); config_reg(3,0);
+    config_reg(1,0); config_reg(2,0); config_reg(3,0); /* Configuring other clock distribution path (i.e. disabling debug step clock, disabling fast oscillator, disabling flip-flop dividing clock) */
     spi_emit_data(0x0100, (void*)counters, 16); /* Program counters correctly for rounds processing, here baby should start consuming power */
 
     /* Prepare internal buffers */
@@ -247,9 +247,7 @@ int libbitfury_sendHashData(unsigned char *midstate, unsigned m7,
 
 	/* Communication routine with the chip! */
 	static unsigned oldbuf[17], newbuf[17];
-	unsigned char hash[32];
-	unsigned char mids[32];
-	unsigned int *mids32 = (unsigned int *) mids;
+	unsigned char hash[32];	
 	unsigned int *mid32 = (unsigned int *) midstate;
 	static unsigned char om[32]; // old midstate
 	static unsigned int *omid32 = (unsigned int *)om;
@@ -258,26 +256,12 @@ int libbitfury_sendHashData(unsigned char *midstate, unsigned m7,
 	static unsigned onbits;
 	int job;
 
-/*	mids32[0] = 0xf4f07c9f;
-	mids32[1] = 0x7ecd6e06;
-	mids32[2] = 0xfeef14a1;
-	mids32[3] = 0x84e244d6;
-	mids32[4] = 0x6f1dcc58;
-	mids32[5] = 0x0a97b253;
-	mids32[6] = 0x20d3de1f;
-	mids32[7] = 0xc907cd69;
-	hashMerkleRoot7 = bswap_32(0xaec2a48e);
-	ntime = bswap_32(0x2da02c4f);
-	nbits = bswap_32(0x3fd40c1a);
-	nnonce = bswap_32(0x50591118);
-	nnonce = 0;
-	memcpy(midstate, mids, 32); */
-
 	/* Programming next value */
 	for (i = 0; i < 8; i++) { atrvec[8+i] = 0; atrvec[i] = mid32[i]; }
 	atrvec[16] = bswap_32(m7);
 	atrvec[17] = bswap_32(ntime);
-	atrvec[18] = bswap_32(nbits); atrvec[19] = 0; //Nonce
+	atrvec[18] = bswap_32(nbits); 
+	atrvec[19] = 0; //Nonce
 	ms3_compute(&atrvec[0]);
 
 	results_num = 0;
