@@ -3,6 +3,7 @@
  *
  *   Copyright (c) 2013 bitfury
  *   Copyright (c) 2013 legkodymov
+ *   Copyright (c) 2013 OrphanedGland
  *
  *   This program is free software; you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License version 2 as
@@ -19,10 +20,12 @@
 #ifndef __LIBBITFURY_H__
 #define __LIBBITFURY_H__
 
+unsigned libbitfury_getNumChips();
+int libbitfury_selectChip(unsigned chip_num);
 extern int libbitfury_detectChips(void);
 int libbitfury_sendHashData(unsigned char *midstate, unsigned m7,
-						 unsigned ntime, unsigned nbits,
-						 unsigned nnonce);
+						 unsigned ntime,  unsigned nbits,
+						 unsigned nnonce, unsigned chip_num);
 
 int libbitfury_readHashData(unsigned int *res);
 

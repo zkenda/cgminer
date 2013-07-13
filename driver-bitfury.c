@@ -80,7 +80,11 @@ static int64_t bitfury_scanHash(struct thr_info *thr)
 	applog(LOG_INFO, "INFO merkle[7]: %08x, ntime: %08x, nbits: %08x, nnonce: %08x",
 		  hashMerkleRoot7, ntime, nbits, nnonce);
 
-	libbitfury_sendHashData(work->midstate, hashMerkleRoot7, ntime, nbits, nnonce);
+  //unsigned num_chips = libbitfury_getNumChips();
+  //unsigned chip_num;
+  //for (chip_num = 1; chip_num <= num_chips; chip_num++) {
+  //setting chip_num to 1 for time being
+	libbitfury_sendHashData(work->midstate, hashMerkleRoot7, ntime, nbits, nnonce, 1);
 
 	i = libbitfury_readHashData(res);
 	for (j = i - 1; j >= 0; j--) {

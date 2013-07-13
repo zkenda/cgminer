@@ -3,6 +3,7 @@
  *
  *   Copyright (c) 2013 bitfury
  *   Copyright (c) 2013 legkodymov
+ *   Copyright (c) 2013 OrphanedGland
  *
  *   This program is free software; you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License version 2 as
@@ -37,6 +38,13 @@
 // 1100 0001 0110 1010 0101 1001 1110 0011
 // C16A59E3
 
+// OrphanedGland modification: number of chained chips
+// replace with detection procedure
+unsigned num_chips = 1;
+unsigned libbitfury_getNumChips() {
+  return num_chips;
+}
+
 unsigned results[16];
 unsigned results_num = 0;
 
@@ -68,7 +76,7 @@ char outbuf[16];
 /* Thermal runaway in this case could produce nice flames of chippy fries */
 
 // Thermometer code from left to right - more ones ==> faster clock!
-unsigned char osc6[8] = { 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+unsigned char osc6[8] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE, 0x00 };
 
 /* Test vectors to calculate (using address-translated loads) */
 unsigned atrvec[] = {
@@ -130,37 +138,48 @@ void ms3_compute(unsigned *p)
 	p[15] = a; p[14] = b; p[13] = c; p[12] = d; p[11] = e; p[10] = f; p[9] = g; p[8] = h;
 }
 
-int libbitfury_detectChips(void) {
-	unsigned w[16];
-	int i;
+// OrphanedGland: procedure to select chip num
+int libbitfury_selectChip(unsigned chip_num) {
+  unsigned i;
+  spi_clear_buf();
+  spi_emit_break();
+  for (i = 1; i < chip_num; i++) {
+    // should only use for small chain of chips
+    // for long chain use spi_emit_fsync()
+    spi_emit_fasync();
+  }
+  return 1;
+}
 
+// OrphanedGland: modified to config multiple chips
+int libbitfury_detectChips(void) {
 	ms3_compute(&atrvec[0]);
 	ms3_compute(&atrvec[20]);
 	ms3_compute(&atrvec[40]);
-	spi_init();
+  spi_init();
+  unsigned i;
+  for (i = 1; i <= num_chips; i++) {
+    unsigned w[16];
+    libbitfury_selectChip(i);
+    spi_emit_data(0x6000, (void*)osc6, 8); /* Program internal on-die slow oscillator frequency */
+    config_reg(7,0); config_reg(8,0); config_reg(9,0); config_reg(10,0); config_reg(11,0);
+    config_reg(6,1);
+    config_reg(4,1); /* Enable slow oscillator */
+    config_reg(1,0); config_reg(2,0); config_reg(3,0);
+    spi_emit_data(0x0100, (void*)counters, 16); /* Program counters correctly for rounds processing, here baby should start consuming power */
 
-	spi_clear_buf();
+    /* Prepare internal buffers */
+    /* PREPARE BUFFERS (INITIAL PROGRAMMING) */
+    memset(&w, 0, sizeof(w)); w[3] = 0xffffffff; w[4] = 0x80000000; w[15] = 0x00000280;
+    spi_emit_data(0x1000, (void*)w, 16*4);
+    spi_emit_data(0x1400, (void*)w,  8*4);
+    memset(w, 0, sizeof(w)); w[0] = 0x80000000; w[7] = 0x100;
+    spi_emit_data(0x1900, (void*)&w[0],8*4); /* Prepare MS and W buffers! */
 
-	spi_emit_break(); /* First we want to break chain! Otherwise we'll get all of traffic bounced to output */
-	spi_emit_data(0x6000, (void*)osc6, 8); /* Program internal on-die slow oscillator frequency */
-	config_reg(7,0); config_reg(8,0); config_reg(9,0); config_reg(10,0); config_reg(11,0);
-	config_reg(6,1);
-	config_reg(4,1); /* Enable slow oscillator */
-	config_reg(1,0); config_reg(2,0); config_reg(3,0);
-	spi_emit_data(0x0100, (void*)counters, 16); /* Program counters correctly for rounds processing, here baby should start consuming power */
+    spi_emit_data(0x3000, (void*)&atrvec[0], 19*4);
 
-	/* Prepare internal buffers */
-	/* PREPARE BUFFERS (INITIAL PROGRAMMING) */
-	memset(&w, 0, sizeof(w)); w[3] = 0xffffffff; w[4] = 0x80000000; w[15] = 0x00000280;
-	spi_emit_data(0x1000, (void*)w, 16*4);
-	spi_emit_data(0x1400, (void*)w,  8*4);
-	memset(w, 0, sizeof(w)); w[0] = 0x80000000; w[7] = 0x100;
-	spi_emit_data(0x1900, (void*)&w[0],8*4); /* Prepare MS and W buffers! */
-
-	spi_emit_data(0x3000, (void*)&atrvec[0], 19*4);
-
-	spi_txrx(spi_gettxbuf(), spi_getrxbuf(), spi_getbufsz());
-
+    spi_txrx(spi_gettxbuf(), spi_getrxbuf(), spi_getbufsz());
+  }
 	return 1;
 }
 
@@ -222,8 +241,8 @@ int rehash(unsigned char *midstate, unsigned m7,
 }
 
 int libbitfury_sendHashData(unsigned char *midstate, unsigned m7,
-						 unsigned ntime, unsigned nbits,
-						 unsigned nnonce) {
+						 unsigned ntime,  unsigned nbits,
+						 unsigned nnonce, unsigned chip_num) {
 	int i;
 
 	/* Communication routine with the chip! */
@@ -263,7 +282,8 @@ int libbitfury_sendHashData(unsigned char *midstate, unsigned m7,
 
 	results_num = 0;
 	while(newbuf[16] == oldbuf[16]) {
-		spi_clear_buf(); spi_emit_break();
+    // OrphanedGland: select chip
+    libbitfury_selectChip(chip_num);
 		spi_emit_data(0x3000, (void*)&atrvec[0], 19*4);
 		spi_txrx(spi_gettxbuf(), spi_getrxbuf(), spi_getbufsz());
 
