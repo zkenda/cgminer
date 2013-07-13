@@ -76,7 +76,7 @@ char outbuf[16];
 /* Thermal runaway in this case could produce nice flames of chippy fries */
 
 // Thermometer code from left to right - more ones ==> faster clock!
-unsigned char osc6[8] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE, 0x00 };
+unsigned char osc6[8] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x0E, 0x00 };
 
 /* Test vectors to calculate (using address-translated loads) */
 unsigned atrvec[] = {
