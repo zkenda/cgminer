@@ -186,6 +186,19 @@ struct cg_usb_device {
 
 #define USB_MAX_READ 8192
 
+#define USB_TMO_0 50
+#define USB_TMO_1 100
+#define USB_TMO_2 500
+#define USB_TMOS 3
+
+struct cg_usb_tmo {
+	uint32_t count;
+	uint32_t min_tmo;
+	uint32_t max_tmo;
+	uint64_t total_over;
+	uint64_t total_tmo;
+};
+
 struct cg_usb_info {
 	uint8_t bus_number;
 	uint8_t device_address;
@@ -224,6 +237,9 @@ struct cg_usb_info {
 	 * multiple of these
 	 */
 	unsigned char bulkbuf[USB_MAX_READ+4];
+
+	uint64_t tmo_count;
+	struct cg_usb_tmo usb_tmo[USB_TMOS];
 };
 
 enum usb_cmds {
@@ -329,6 +345,9 @@ void *usb_resource_thread(void *userdata);
 
 #define usb_read(cgpu, buf, bufsiz, read, cmd) \
 	_usb_read(cgpu, DEFAULT_EP_IN, buf, bufsiz, read, DEVTIMEOUT, NULL, cmd, false)
+
+#define usb_read_once_notimeout(cgpu, buf, bufsiz, read, cmd) \
+	_usb_read(cgpu, DEFAULT_EP_IN, buf, bufsiz, read, 0, NULL, cmd, true)
 
 #define usb_read_once(cgpu, buf, bufsiz, read, cmd) \
 	_usb_read(cgpu, DEFAULT_EP_IN, buf, bufsiz, read, DEVTIMEOUT, NULL, cmd, true)

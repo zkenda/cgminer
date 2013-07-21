@@ -196,6 +196,13 @@ struct ICARUS_INFO {
 	int work_division;
 	int fpga_count;
 	uint32_t nonce_mask;
+
+	// Read thread data
+	bool result;
+	pthread_t read_thr;
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	unsigned char nonce_bin[ICARUS_READ_SIZE];
 };
 
 #define END_CONDITION 0x0000ffff
@@ -747,8 +754,6 @@ static bool icarus_detect_one(struct libusb_device *dev, struct usb_find_devices
 	if (!usb_init(icarus, dev, found))
 		goto shin;
 
-	usb_buffer_enable(icarus);
-
 	get_options(this_option_offset, icarus, &baud, &work_division, &fpga_count);
 
 	hex2bin(ob_bin, golden_ob, sizeof(ob_bin));
@@ -839,9 +844,48 @@ static void icarus_detect()
 	usb_detect(&icarus_drv, icarus_detect_one);
 }
 
-static bool icarus_prepare(__maybe_unused struct thr_info *thr)
+static void *icarus_read_nonces(void *arg)
 {
-//	struct cgpu_info *icarus = thr->cgpu;
+	struct cgpu_info *icarus = (struct cgpu_info *)arg;
+	struct ICARUS_INFO *info = (struct ICARUS_INFO *)icarus->device_data;
+
+	while (likely(!icarus->shutdown)) {
+		char nonce_buf[ICARUS_READ_SIZE];
+		int err, amt;
+
+		if (unlikely(icarus->usbinfo.nodev))
+			break;
+
+		err = usb_read_once_notimeout(icarus, nonce_buf, ICARUS_READ_SIZE,
+					 &amt, C_GETRESULTS);
+		if (err < 0) {
+			applog(LOG_ERR, "%s%i: Comms error (rerr=%d amt=%d)",
+					icarus->drv->name, icarus->device_id, err, amt);
+			dev_error(icarus, REASON_DEV_COMMS_ERROR);
+			continue;
+		}
+		if (!amt)
+			continue;
+
+		mutex_lock(&info->lock);
+		info->result = true;
+		memcpy(info->nonce_bin, nonce_buf, ICARUS_READ_SIZE);
+		pthread_cond_signal(&info->cond);
+		mutex_unlock(&info->lock);
+	}
+	return NULL;
+}
+
+static bool icarus_prepare(struct thr_info *thr)
+{
+	struct cgpu_info *icarus = thr->cgpu;
+	struct ICARUS_INFO *info = (struct ICARUS_INFO *)(icarus->device_data);
+
+	mutex_init(&info->lock);
+	if (unlikely(pthread_cond_init(&info->cond, NULL)))
+		quit(1, "Failed to pthread_cond_init icarus cond");
+	if (unlikely(pthread_create(&info->read_thr, NULL, icarus_read_nonces, (void *)icarus)))
+		quit(1, "Failed to pthread_create icarus read_thr");
 
 	return true;
 }
@@ -869,6 +913,7 @@ static int64_t icarus_scanhash(struct thr_info *thr, struct work *work,
 	int64_t estimate_hashes;
 	uint32_t values;
 	int64_t hash_count_range;
+	struct timespec abstime;
 
 	// Device is gone
 	if (icarus->usbinfo.nodev)
@@ -882,9 +927,7 @@ static int64_t icarus_scanhash(struct thr_info *thr, struct work *work,
 	rev(ob_bin, 32);
 	rev(ob_bin + 52, 12);
 
-	// We only want results for the work we are about to send
-	usb_buffer_clear(icarus);
-
+	info->result = false;
 	err = usb_write(icarus, (char *)ob_bin, sizeof(ob_bin), &amount, C_SENDWORK);
 	if (err < 0 || amount != sizeof(ob_bin)) {
 		applog(LOG_ERR, "%s%i: Comms error (werr=%d amt=%d)",
@@ -894,9 +937,6 @@ static int64_t icarus_scanhash(struct thr_info *thr, struct work *work,
 		return 0;
 	}
 
-	/* Simple attempt to emulate writing at 115200 baud */
-	nusleep(4444);
-
 	if (opt_debug) {
 		ob_hex = bin2hex(ob_bin, sizeof(ob_bin));
 		applog(LOG_DEBUG, "%s%d: sent %s",
@@ -904,38 +944,58 @@ static int64_t icarus_scanhash(struct thr_info *thr, struct work *work,
 		free(ob_hex);
 	}
 
-	/* Icarus will return 4 bytes (ICARUS_READ_SIZE) nonces or nothing */
-	memset(nonce_bin, 0, sizeof(nonce_bin));
-	ret = icarus_get_nonce(icarus, nonce_bin, &tv_start, &tv_finish, thr, info->read_time);
-	if (ret == ICA_NONCE_ERROR)
-		return 0;
+	cgtime(&tv_start);
+
+	do {
+		int rc;
+
+		if (unlikely(icarus->usbinfo.nodev))
+			return -1;
+
+		cgtime(&tv_finish);
+		rc = SECTOMS(tdiff(&tv_finish, &tv_start));
+		if (rc >= info->read_time || thr->work_restart) {
+			timersub(&tv_finish, &tv_start, &elapsed);
+
+			// ONLY up to just when it aborted
+			// We didn't read a reply so we don't subtract ICARUS_READ_TIME
+			estimate_hashes = ((double)(elapsed.tv_sec)
+						+ ((double)(elapsed.tv_usec))/((double)1000000)) / info->Hs;
+
+			// If some Serial-USB delay allowed the full nonce range to
+			// complete it can't have done more than a full nonce
+			if (unlikely(estimate_hashes > 0xffffffff))
+				estimate_hashes = 0xffffffff;
+
+			if (opt_debug) {
+				applog(LOG_DEBUG, "%s%d: no nonce = 0x%08lX hashes (%ld.%06lds)",
+						icarus->drv->name, icarus->device_id,
+						(long unsigned int)estimate_hashes,
+						elapsed.tv_sec, elapsed.tv_usec);
+			}
+
+			thr->work_restart = false;
+			return estimate_hashes;
+		}
+
+		/* Wait on the conditional or cycle every 100ms */
+		abstime.tv_sec = 0;
+		abstime.tv_nsec = 100000000;
+
+		mutex_lock(&info->lock);
+		if (!info->result)
+			ret = pthread_cond_timedwait(&info->cond, &info->lock, &abstime);
+		if (info->result) {
+			info->result = false;
+			ret = 0;
+			memcpy(&nonce_bin, &info->nonce_bin, ICARUS_READ_SIZE);
+		}
+		mutex_unlock(&info->lock);
+	} while (ret);
 
 	work->blk.nonce = 0xffffffff;
 
-	// aborted before becoming idle, get new work
-	if (ret == ICA_NONCE_TIMEOUT || ret == ICA_NONCE_RESTART) {
-		timersub(&tv_finish, &tv_start, &elapsed);
-
-		// ONLY up to just when it aborted
-		// We didn't read a reply so we don't subtract ICARUS_READ_TIME
-		estimate_hashes = ((double)(elapsed.tv_sec)
-					+ ((double)(elapsed.tv_usec))/((double)1000000)) / info->Hs;
-
-		// If some Serial-USB delay allowed the full nonce range to
-		// complete it can't have done more than a full nonce
-		if (unlikely(estimate_hashes > 0xffffffff))
-			estimate_hashes = 0xffffffff;
-
-		if (opt_debug) {
-			applog(LOG_DEBUG, "%s%d: no nonce = 0x%08lX hashes (%ld.%06lds)",
-					icarus->drv->name, icarus->device_id,
-					(long unsigned int)estimate_hashes,
-					elapsed.tv_sec, elapsed.tv_usec);
-		}
-
-		return estimate_hashes;
-	}
-
+	/* Icarus will return 4 bytes (ICARUS_READ_SIZE) nonces or nothing */
 	memcpy((char *)&nonce, nonce_bin, sizeof(nonce_bin));
 	nonce = htobe32(nonce);
 	curr_hw_errors = icarus->hw_errors;
