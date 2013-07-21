@@ -856,7 +856,7 @@ static void *icarus_read_nonces(void *arg)
 		if (unlikely(icarus->usbinfo.nodev))
 			break;
 
-		err = usb_read_notimeout(icarus, nonce_buf, ICARUS_READ_SIZE,
+		err = usb_read_once_notimeout(icarus, nonce_buf, ICARUS_READ_SIZE,
 					 &amt, C_GETRESULTS);
 		if (err < 0) {
 			applog(LOG_ERR, "%s%i: Comms error (rerr=%d amt=%d)",
