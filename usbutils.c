@@ -2435,7 +2435,7 @@ int _usb_read(struct cgpu_info *cgpu, int ep, char *buf, size_t bufsiz, int *pro
 
 			done = tdiff(&tv_finish, &read_start);
 			// N.B. this is: return LIBUSB_SUCCESS with whatever size has already been read
-			if (unlikely(done >= max))
+			if (unlikely(done >= max && !notimeout))
 				break;
 			timeout = initial_timeout - (done * 1000);
 			if (!timeout && !notimeout)
@@ -2547,7 +2547,7 @@ int _usb_read(struct cgpu_info *cgpu, int ep, char *buf, size_t bufsiz, int *pro
 
 		done = tdiff(&tv_finish, &read_start);
 		// N.B. this is: return LIBUSB_SUCCESS with whatever size has already been read
-		if (unlikely(done >= max))
+		if (unlikely(done >= max && !notimeout))
 			break;
 		timeout = initial_timeout - (done * 1000);
 		if (!timeout && !notimeout)
