@@ -2238,7 +2238,7 @@ static char *find_end(unsigned char *buf, unsigned char *ptr, int ptrlen, int to
 #define USB_MAX_READ 8192
 #define USB_RETRY_MAX 5
 
-static int
+int
 usb_bulk_transfer(struct libusb_device_handle *dev_handle,
 		  unsigned char endpoint, unsigned char *data, int length,
 		  int *transferred, unsigned int timeout,
@@ -2317,7 +2317,7 @@ usb_bulk_transfer(struct libusb_device_handle *dev_handle,
 int _usb_read(struct cgpu_info *cgpu, int ep, char *buf, size_t bufsiz, int *processed, unsigned int timeout, const char *end, enum usb_cmds cmd, bool readonce)
 {
 	struct cg_usb_device *usbdev;
-	bool ftdi;
+	bool ftdi, notimeout;
 	struct timeval read_start, tv_finish;
 	unsigned int initial_timeout;
 	double max, done;
@@ -2341,6 +2341,7 @@ int _usb_read(struct cgpu_info *cgpu, int ep, char *buf, size_t bufsiz, int *pro
 
 	usbdev = cgpu->usbdev;
 	ftdi = (usbdev->usb_type == USB_TYPE_FTDI);
+	notimeout = (timeout == 0);
 
 	USBDEBUG("USB debug: _usb_read(%s (nodev=%s),ep=%d,buf=%p,bufsiz=%zu,proc=%p,timeout=%u,end=%s,cmd=%s,ftdi=%s,readonce=%s)", cgpu->drv->name, bool_str(cgpu->usbinfo.nodev), ep, buf, bufsiz, processed, timeout, end ? (char *)str_text((char *)end) : "NULL", usb_cmdname(cmd), bool_str(ftdi), bool_str(readonce));
 
@@ -2421,6 +2422,9 @@ int _usb_read(struct cgpu_info *cgpu, int ep, char *buf, size_t bufsiz, int *pro
 
 			tot += got;
 
+			if (notimeout && err == LIBUSB_ERROR_TIMEOUT)
+				err = 0;
+
 			if (err || readonce)
 				break;
 
@@ -2434,7 +2438,7 @@ int _usb_read(struct cgpu_info *cgpu, int ep, char *buf, size_t bufsiz, int *pro
 			if (unlikely(done >= max))
 				break;
 			timeout = initial_timeout - (done * 1000);
-			if (!timeout)
+			if (!timeout && !notimeout)
 				break;
 		}
 
@@ -2527,6 +2531,9 @@ int _usb_read(struct cgpu_info *cgpu, int ep, char *buf, size_t bufsiz, int *pro
 
 		tot += got;
 
+		if (notimeout && err == LIBUSB_ERROR_TIMEOUT)
+			err = 0;
+
 		if (err || readonce)
 			break;
 
@@ -2543,7 +2550,7 @@ int _usb_read(struct cgpu_info *cgpu, int ep, char *buf, size_t bufsiz, int *pro
 		if (unlikely(done >= max))
 			break;
 		timeout = initial_timeout - (done * 1000);
-		if (!timeout)
+		if (!timeout && !notimeout)
 			break;
 	}
 
