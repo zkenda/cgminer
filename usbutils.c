@@ -2433,12 +2433,15 @@ int _usb_read(struct cgpu_info *cgpu, int ep, char *buf, size_t bufsiz, int *pro
 
 			first = false;
 
+			if (notimeout)
+				continue;
+
 			done = tdiff(&tv_finish, &read_start);
 			// N.B. this is: return LIBUSB_SUCCESS with whatever size has already been read
-			if (unlikely(done >= max && !notimeout))
+			if (unlikely(done >= max))
 				break;
 			timeout = initial_timeout - (done * 1000);
-			if (!timeout && !notimeout)
+			if (!timeout)
 				break;
 		}
 
@@ -2545,12 +2548,15 @@ int _usb_read(struct cgpu_info *cgpu, int ep, char *buf, size_t bufsiz, int *pro
 
 		first = false;
 
+		if (notimeout)
+			continue;
+
 		done = tdiff(&tv_finish, &read_start);
 		// N.B. this is: return LIBUSB_SUCCESS with whatever size has already been read
-		if (unlikely(done >= max && !notimeout))
+		if (unlikely(done >= max))
 			break;
 		timeout = initial_timeout - (done * 1000);
-		if (!timeout && !notimeout)
+		if (!timeout)
 			break;
 	}
 
