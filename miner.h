@@ -726,16 +726,24 @@ endian_flip128(void __maybe_unused *dest_p, const void __maybe_unused *src_p)
 
 extern void _quit(int status);
 
-static inline void mutex_lock(pthread_mutex_t *lock)
+#define mutex_lock(_lock) _mutex_lock(_lock, __FILE__, __func__, __LINE__) 
+#define mutex_unlock_noyield(_lock) _mutex_unlock_noyield(_lock, __FILE__, __func__, __LINE__) 
+#define wr_lock(_lock) _wr_lock(_lock, __FILE__, __func__, __LINE__) 
+#define rd_lock(_lock) _rd_lock(_lock, __FILE__, __func__, __LINE__) 
+#define rw_unlock(_lock) _rw_unlock(_lock, __FILE__, __func__, __LINE__) 
+#define mutex_init(_lock) _mutex_init(_lock, __FILE__, __func__, __LINE__) 
+#define rwlock_init(_lock) _rwlock_init(_lock, __FILE__, __func__, __LINE__) 
+
+static inline void _mutex_lock(pthread_mutex_t *lock, const char *file, const char *func, const int line)
 {
 	if (unlikely(pthread_mutex_lock(lock)))
-		quit(1, "WTF MUTEX ERROR ON LOCK!");
+		quitfrom(1, file, func, line, "WTF MUTEX ERROR ON LOCK! errno=%d", errno);
 }
 
-static inline void mutex_unlock_noyield(pthread_mutex_t *lock)
+static inline void _mutex_unlock_noyield(pthread_mutex_t *lock, const char *file, const char *func, const int line)
 {
 	if (unlikely(pthread_mutex_unlock(lock)))
-		quit(1, "WTF MUTEX ERROR ON UNLOCK!");
+		quitfrom(1, file, func, line, "WTF MUTEX ERROR ON UNLOCK! errno=%d", errno);
 }
 
 static inline void mutex_unlock(pthread_mutex_t *lock)
@@ -749,45 +757,56 @@ static inline int mutex_trylock(pthread_mutex_t *lock)
 	return pthread_mutex_trylock(lock);
 }
 
-static inline void wr_lock(pthread_rwlock_t *lock)
+static inline void _wr_lock(pthread_rwlock_t *lock, const char *file, const char *func, const int line)
 {
 	if (unlikely(pthread_rwlock_wrlock(lock)))
-		quit(1, "WTF WRLOCK ERROR ON LOCK!");
+		quitfrom(1, file, func, line, "WTF WRLOCK ERROR ON LOCK! errno=%d", errno);
 }
 
-static inline void rd_lock(pthread_rwlock_t *lock)
+static inline void _rd_lock(pthread_rwlock_t *lock, const char *file, const char *func, const int line)
 {
 	if (unlikely(pthread_rwlock_rdlock(lock)))
-		quit(1, "WTF RDLOCK ERROR ON LOCK!");
+		quitfrom(1, file, func, line, "WTF RDLOCK ERROR ON LOCK! errno=%d", errno);
 }
 
-static inline void rw_unlock(pthread_rwlock_t *lock)
+static inline void _rw_unlock(pthread_rwlock_t *lock, const char *file, const char *func, const int line)
 {
 	if (unlikely(pthread_rwlock_unlock(lock)))
-		quit(1, "WTF RWLOCK ERROR ON UNLOCK!");
-	sched_yield();
+		quitfrom(1, file, func, line, "WTF RWLOCK ERROR ON UNLOCK! errno=%d", errno);
+}
+
+static inline void rd_unlock_noyield(pthread_rwlock_t *lock)
+{
+	rw_unlock(lock);
+}
+
+static inline void wr_unlock_noyield(pthread_rwlock_t *lock)
+{
+	rw_unlock(lock);
 }
 
 static inline void rd_unlock(pthread_rwlock_t *lock)
 {
 	rw_unlock(lock);
+	sched_yield();
 }
 
 static inline void wr_unlock(pthread_rwlock_t *lock)
 {
 	rw_unlock(lock);
+	sched_yield();
 }
 
-static inline void mutex_init(pthread_mutex_t *lock)
+static inline void _mutex_init(pthread_mutex_t *lock, const char *file, const char *func, const int line)
 {
 	if (unlikely(pthread_mutex_init(lock, NULL)))
-		quit(1, "Failed to pthread_mutex_init");
+		quitfrom(1, file, func, line, "Failed to pthread_mutex_init errno=%d", errno);
 }
 
-static inline void rwlock_init(pthread_rwlock_t *lock)
+static inline void _rwlock_init(pthread_rwlock_t *lock, const char *file, const char *func, const int line)
 {
 	if (unlikely(pthread_rwlock_init(lock, NULL)))
-		quit(1, "Failed to pthread_rwlock_init");
+		quitfrom(1, file, func, line, "Failed to pthread_rwlock_init errno=%d", errno);
 }
 
 /* cgminer locks, a write biased variant of rwlocks */
@@ -829,6 +848,14 @@ static inline void cg_wlock(cglock_t *lock)
 {
 	mutex_lock(&lock->mutex);
 	wr_lock(&lock->rwlock);
+}
+
+/* Downgrade write variant to a read lock */
+static inline void cg_dwlock(cglock_t *lock)
+{
+	wr_unlock_noyield(&lock->rwlock);
+	rd_lock(&lock->rwlock);
+	mutex_unlock_noyield(&lock->mutex);
 }
 
 /* Downgrade intermediate variant to a read lock */
@@ -956,14 +983,26 @@ extern bool add_pool_details(struct pool *pool, bool live, char *url, char *user
 #define MAX_GPUDEVICES 16
 #define MAX_DEVICES 4096
 
-#define MIN_INTENSITY -10
-#define _MIN_INTENSITY_STR "-10"
+#define MIN_SHA_INTENSITY -10
+#define MIN_SHA_INTENSITY_STR "-10"
+#define MAX_SHA_INTENSITY 14
+#define MAX_SHA_INTENSITY_STR "14"
+#define MIN_SCRYPT_INTENSITY 8
+#define MIN_SCRYPT_INTENSITY_STR "8"
+#define MAX_SCRYPT_INTENSITY 20
+#define MAX_SCRYPT_INTENSITY_STR "20"
 #ifdef USE_SCRYPT
-#define MAX_INTENSITY 20
-#define _MAX_INTENSITY_STR "20"
+#define MIN_INTENSITY (opt_scrypt ? MIN_SCRYPT_INTENSITY : MIN_SHA_INTENSITY)
+#define MIN_INTENSITY_STR (opt_scrypt ? MIN_SCRYPT_INTENSITY_STR : MIN_SHA_INTENSITY_STR)
+#define MAX_INTENSITY (opt_scrypt ? MAX_SCRYPT_INTENSITY : MAX_SHA_INTENSITY)
+#define MAX_INTENSITY_STR (opt_scrypt ? MAX_SCRYPT_INTENSITY_STR : MAX_SHA_INTENSITY_STR)
+#define MAX_GPU_INTENSITY MAX_SCRYPT_INTENSITY
 #else
-#define MAX_INTENSITY 14
-#define _MAX_INTENSITY_STR "14"
+#define MIN_INTENSITY MIN_SHA_INTENSITY
+#define MIN_INTENSITY_STR MIN_SHA_INTENSITY_STR
+#define MAX_INTENSITY MAX_SHA_INTENSITY
+#define MAX_INTENSITY_STR MAX_SHA_INTENSITY_STR
+#define MAX_GPU_INTENSITY MAX_SHA_INTENSITY
 #endif
 
 extern bool hotplug_mode;
@@ -1008,6 +1047,7 @@ extern char *current_fullhash;
 extern double current_diff;
 extern uint64_t best_diff;
 extern struct timeval block_timeval;
+extern char *workpadding;
 
 #ifdef HAVE_OPENCL
 typedef struct {
@@ -1060,18 +1100,13 @@ enum pool_enable {
 struct stratum_work {
 	char *job_id;
 	char *prev_hash;
-	char *coinbase1;
-	char *coinbase2;
-	char **merkle;
+	unsigned char **merkle_bin;
 	char *bbversion;
 	char *nbit;
 	char *ntime;
 	bool clean;
 
-	size_t cb1_len;
-	size_t cb2_len;
 	size_t cb_len;
-
 	size_t header_len;
 	int merkles;
 	double diff;
@@ -1153,6 +1188,7 @@ struct pool {
 	size_t sockbuf_size;
 	char *sockaddr_url; /* stripped url used for sockaddr */
 	char *nonce1;
+	unsigned char *nonce1bin;
 	size_t n1_len;
 	uint32_t nonce2;
 	int n2size;
@@ -1180,10 +1216,16 @@ struct pool {
 	uint32_t gbt_version;
 	uint32_t curtime;
 	uint32_t gbt_bits;
-	unsigned char *gbt_coinbase;
 	unsigned char *txn_hashes;
 	int gbt_txns;
 	int coinbase_len;
+
+	/* Shared by both stratum & GBT */
+	unsigned char *coinbase;
+	int nonce2_offset;
+	unsigned char header_bin[128];
+	int merkle_offset;
+
 	struct timeval tv_lastwork;
 };
 
@@ -1227,13 +1269,14 @@ struct work {
 
 	bool		stratum;
 	char 		*job_id;
-	char		*nonce2;
+	uint32_t	nonce2;
+	size_t		nonce2_len;
 	char		*ntime;
 	double		sdiff;
 	char		*nonce1;
 
 	bool		gbt;
-	char		*gbt_coinbase;
+	char		*coinbase;
 	int		gbt_txns;
 
 	unsigned int	work_block;
@@ -1301,6 +1344,7 @@ extern bool submit_nonce(struct thr_info *thr, struct work *work, uint32_t nonce
 extern struct work *get_queued(struct cgpu_info *cgpu);
 extern struct work *__find_work_bymidstate(struct work *que, char *midstate, size_t midstatelen, char *data, int offset, size_t datalen);
 extern struct work *find_queued_work_bymidstate(struct cgpu_info *cgpu, char *midstate, size_t midstatelen, char *data, int offset, size_t datalen);
+extern struct work *clone_queued_work_bymidstate(struct cgpu_info *cgpu, char *midstate, size_t midstatelen, char *data, int offset, size_t datalen);
 extern void work_completed(struct cgpu_info *cgpu, struct work *work);
 extern void hash_queued_work(struct thr_info *mythr);
 extern void _wlog(const char *str);
@@ -1355,7 +1399,8 @@ enum api_data_type {
 	API_FREQ,
 	API_VOLTS,
 	API_HS,
-	API_DIFF
+	API_DIFF,
+	API_PERCENT
 };
 
 struct api_data {

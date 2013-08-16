@@ -192,6 +192,21 @@ static struct usb_find_devices find_dev[] = {
 #ifdef USE_AVALON
 	{
 		.drv = DRV_AVALON,
+		.name = "BTB",
+		.ident = IDENT_BTB,
+		.idVendor = IDVENDOR_FTDI,
+		.idProduct = 0x6001,
+		.iManufacturer = "Burnin Electronics",
+		.iProduct = "BitBurner",
+		.kernel = 0,
+		.config = 1,
+		.interface = 0,
+		.timeout = AVALON_TIMEOUT_MS,
+		.latency = 10,
+		.epcount = ARRAY_SIZE(ava_eps),
+		.eps = ava_eps },
+	{
+		.drv = DRV_AVALON,
 		.name = "AVA",
 		.ident = IDENT_AVA,
 		.idVendor = IDVENDOR_FTDI,
@@ -535,6 +550,8 @@ static const char *C_AVALON_RESET_S = "AvalonReset";
 static const char *C_GET_AVALON_RESET_S = "GetAvalonReset";
 static const char *C_FTDI_STATUS_S = "FTDIStatus";
 static const char *C_ENABLE_UART_S = "EnableUART";
+static const char *C_BB_SET_VOLTAGE_S = "SetCoreVoltage";
+static const char *C_BB_GET_VOLTAGE_S = "GetCoreVoltage";
 
 #ifdef EOL
 #undef EOL
@@ -1023,6 +1040,8 @@ static void cgusb_check_init()
 		usb_commands[C_GET_AVALON_RESET] = C_GET_AVALON_RESET_S;
 		usb_commands[C_FTDI_STATUS] = C_FTDI_STATUS_S;
 		usb_commands[C_ENABLE_UART] = C_ENABLE_UART_S;
+		usb_commands[C_BB_SET_VOLTAGE] = C_BB_SET_VOLTAGE_S;
+		usb_commands[C_BB_GET_VOLTAGE] = C_BB_GET_VOLTAGE_S;
 
 		stats_initialised = true;
 	}
@@ -1779,11 +1798,27 @@ out_unlock:
 	return bad;
 }
 
-bool usb_init(struct cgpu_info *cgpu, struct libusb_device *dev, struct usb_find_devices *found)
+bool usb_init(struct cgpu_info *cgpu, struct libusb_device *dev, struct usb_find_devices *found_match)
 {
-	int ret;
+	struct usb_find_devices *found_use = NULL;
+	int uninitialised_var(ret);
+	int i;
 
-	ret = _usb_init(cgpu, dev, found);
+	for (i = 0; find_dev[i].drv != DRV_LAST; i++) {
+		if (find_dev[i].drv == found_match->drv &&
+		    find_dev[i].idVendor == found_match->idVendor &&
+		    find_dev[i].idProduct == found_match->idProduct) {
+			found_use = malloc(sizeof(*found_use));
+			if (unlikely(!found_use))
+				quit(1, "USB failed to malloc found_use");
+			memcpy(found_use, &(find_dev[i]), sizeof(*found_use));
+
+			ret = _usb_init(cgpu, dev, found_use);
+
+			if (ret != USB_INIT_IGNORE)
+				break;
+		}
+	}
 
 	if (ret == USB_INIT_FAIL)
 		applog(LOG_ERR, "%s detect (%d:%d) failed to initialise (incorrect device?)",
@@ -1952,6 +1987,7 @@ void usb_detect(struct device_drv *drv, bool (*device_detect)(struct libusb_devi
 					total_count++;
 					drv_count[drv->drv_id].count++;
 				}
+				free(found);
 			}
 		}
 	}

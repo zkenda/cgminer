@@ -564,7 +564,7 @@ char *get_proxy(char *url, struct pool *pool)
 			len = split - url;
 			pool->rpc_proxy = malloc(1 + len - plen);
 			if (!(pool->rpc_proxy))
-				quit(1, "Failed to malloc rpc_proxy");
+				quithere(1, "Failed to malloc rpc_proxy");
 
 			strcpy(pool->rpc_proxy, url + plen);
 			pool->rpc_proxytype = proxynames[i].proxytype;
@@ -581,19 +581,19 @@ char *get_proxy(char *url, struct pool *pool)
  * aligned array  sizes */
 char *bin2hex(const unsigned char *p, size_t len)
 {
-	unsigned int i;
 	ssize_t slen;
 	char *s;
+	int i;
 
 	slen = len * 2 + 1;
 	if (slen % 4)
 		slen += 4 - (slen % 4);
 	s = calloc(slen, 1);
 	if (unlikely(!s))
-		quit(1, "Failed to calloc in bin2hex");
+		quithere(1, "Failed to calloc");
 
-	for (i = 0; i < len; i++)
-		sprintf(s + (i * 2), "%02x", (unsigned int) p[i]);
+	for (i = 0; i < (int)len; i++)
+		sprintf(s + (i * 2), "%02x", (unsigned int)p[i]);
 
 	return s;
 }
@@ -1090,7 +1090,7 @@ static void recalloc_sock(struct pool *pool, size_t len)
 	// applog(LOG_DEBUG, "Recallocing pool sockbuf to %d", new);
 	pool->sockbuf = realloc(pool->sockbuf, new);
 	if (!pool->sockbuf)
-		quit(1, "Failed to realloc pool sockbuf in recalloc_sock");
+		quithere(1, "Failed to realloc pool sockbuf");
 	memset(pool->sockbuf + old, 0, new - old);
 	pool->sockbuf_size = new;
 }
@@ -1197,9 +1197,14 @@ static char *json_array_string(json_t *val, unsigned int entry)
 	return NULL;
 }
 
+static char *blank_merkel = "0000000000000000000000000000000000000000000000000000000000000000";
+
 static bool parse_notify(struct pool *pool, json_t *val)
 {
-	char *job_id, *prev_hash, *coinbase1, *coinbase2, *bbversion, *nbit, *ntime;
+	char *job_id, *prev_hash, *coinbase1, *coinbase2, *bbversion, *nbit,
+	     *ntime, *header;
+	size_t cb1_len, cb2_len, alloc_len;
+	unsigned char *cb1, *cb2;
 	bool clean, ret = false;
 	int merkles, i;
 	json_t *arr;
@@ -1241,42 +1246,78 @@ static bool parse_notify(struct pool *pool, json_t *val)
 	cg_wlock(&pool->data_lock);
 	free(pool->swork.job_id);
 	free(pool->swork.prev_hash);
-	free(pool->swork.coinbase1);
-	free(pool->swork.coinbase2);
 	free(pool->swork.bbversion);
 	free(pool->swork.nbit);
 	free(pool->swork.ntime);
 	pool->swork.job_id = job_id;
 	pool->swork.prev_hash = prev_hash;
-	pool->swork.coinbase1 = coinbase1;
-	pool->swork.cb1_len = strlen(coinbase1) / 2;
-	pool->swork.coinbase2 = coinbase2;
-	pool->swork.cb2_len = strlen(coinbase2) / 2;
+	cb1_len = strlen(coinbase1) / 2;
+	cb2_len = strlen(coinbase2) / 2;
 	pool->swork.bbversion = bbversion;
 	pool->swork.nbit = nbit;
 	pool->swork.ntime = ntime;
 	pool->swork.clean = clean;
-	pool->swork.cb_len = pool->swork.cb1_len + pool->n1_len + pool->n2size + pool->swork.cb2_len;
+	alloc_len = pool->swork.cb_len = cb1_len + pool->n1_len + pool->n2size + cb2_len;
+	pool->nonce2_offset = cb1_len + pool->n1_len;
 
 	for (i = 0; i < pool->swork.merkles; i++)
-		free(pool->swork.merkle[i]);
+		free(pool->swork.merkle_bin[i]);
 	if (merkles) {
-		pool->swork.merkle = realloc(pool->swork.merkle, sizeof(char *) * merkles + 1);
-		for (i = 0; i < merkles; i++)
-			pool->swork.merkle[i] = json_array_string(arr, i);
+		pool->swork.merkle_bin = realloc(pool->swork.merkle_bin,
+						 sizeof(char *) * merkles + 1);
+		for (i = 0; i < merkles; i++) {
+			char *merkle = json_array_string(arr, i);
+
+			pool->swork.merkle_bin[i] = malloc(32);
+			if (unlikely(!pool->swork.merkle_bin[i]))
+				quit(1, "Failed to malloc pool swork merkle_bin");
+			hex2bin(pool->swork.merkle_bin[i], merkle, 32);
+			free(merkle);
+		}
 	}
 	pool->swork.merkles = merkles;
 	if (clean)
 		pool->nonce2 = 0;
-	pool->swork.header_len = strlen(pool->swork.bbversion) +
-				 strlen(pool->swork.prev_hash) +
+	pool->merkle_offset = strlen(pool->swork.bbversion) +
+			      strlen(pool->swork.prev_hash);
+	pool->swork.header_len = pool->merkle_offset +
+	/* merkle_hash */	 32 +
 				 strlen(pool->swork.ntime) +
 				 strlen(pool->swork.nbit) +
-	/* merkle_hash */	 32 +
 	/* nonce */		 8 +
 	/* workpadding */	 96;
+	pool->merkle_offset /= 2;
 	pool->swork.header_len = pool->swork.header_len * 2 + 1;
 	align_len(&pool->swork.header_len);
+	header = alloca(pool->swork.header_len);
+	snprintf(header, pool->swork.header_len,
+		"%s%s%s%s%s%s%s",
+		pool->swork.bbversion,
+		pool->swork.prev_hash,
+		blank_merkel,
+		pool->swork.ntime,
+		pool->swork.nbit,
+		"00000000", /* nonce */
+		workpadding);
+	if (unlikely(!hex2bin(pool->header_bin, header, 128)))
+		quit(1, "Failed to convert header to header_bin in parse_notify");
+
+	cb1 = calloc(cb1_len, 1);
+	if (unlikely(!cb1))
+		quithere(1, "Failed to calloc cb1 in parse_notify");
+	hex2bin(cb1, coinbase1, cb1_len);
+	cb2 = calloc(cb2_len, 1);
+	if (unlikely(!cb2))
+		quithere(1, "Failed to calloc cb2 in parse_notify");
+	hex2bin(cb2, coinbase2, cb2_len);
+	free(pool->coinbase);
+	align_len(&alloc_len);
+	pool->coinbase = calloc(alloc_len, 1);
+	if (unlikely(!pool->coinbase))
+		quit(1, "Failed to calloc pool coinbase in parse_notify");
+	memcpy(pool->coinbase, cb1, cb1_len);
+	memcpy(pool->coinbase + cb1_len, pool->nonce1bin, pool->n1_len);
+	memcpy(pool->coinbase + cb1_len + pool->n1_len + pool->n2size, cb2, cb2_len);
 	cg_wunlock(&pool->data_lock);
 
 	if (opt_protocol) {
@@ -1284,13 +1325,15 @@ static bool parse_notify(struct pool *pool, json_t *val)
 		applog(LOG_DEBUG, "prev_hash: %s", prev_hash);
 		applog(LOG_DEBUG, "coinbase1: %s", coinbase1);
 		applog(LOG_DEBUG, "coinbase2: %s", coinbase2);
-		for (i = 0; i < merkles; i++)
-			applog(LOG_DEBUG, "merkle%d: %s", i, pool->swork.merkle[i]);
 		applog(LOG_DEBUG, "bbversion: %s", bbversion);
 		applog(LOG_DEBUG, "nbit: %s", nbit);
 		applog(LOG_DEBUG, "ntime: %s", ntime);
 		applog(LOG_DEBUG, "clean: %s", clean ? "yes" : "no");
 	}
+	free(coinbase1);
+	free(coinbase2);
+	free(cb1);
+	free(cb2);
 
 	/* A notify message is the closest stratum gets to a getwork */
 	pool->getwork_requested++;
@@ -1567,7 +1610,7 @@ static bool setup_stratum_socket(struct pool *pool)
 	if (!pool->sockbuf) {
 		pool->sockbuf = calloc(RBUFSIZE, 1);
 		if (!pool->sockbuf)
-			quit(1, "Failed to calloc pool sockbuf in initiate_stratum");
+			quithere(1, "Failed to calloc pool sockbuf");
 		pool->sockbuf_size = RBUFSIZE;
 	}
 
@@ -1707,6 +1750,11 @@ resend:
 	pool->sessionid = sessionid;
 	pool->nonce1 = nonce1;
 	pool->n1_len = strlen(nonce1) / 2;
+	free(pool->nonce1bin);
+	pool->nonce1bin = calloc(pool->n1_len, 1);
+	if (unlikely(!pool->nonce1bin))
+		quithere(1, "Failed to calloc pool->nonce1bin");
+	hex2bin(pool->nonce1bin, pool->nonce1, pool->n1_len);
 	pool->n2size = n2size;
 	cg_wunlock(&pool->data_lock);
 
@@ -1814,7 +1862,7 @@ void *realloc_strcat(char *ptr, char *s)
 
 	ret = malloc(len);
 	if (unlikely(!ret))
-		quit(1, "Failed to malloc in realloc_strcat");
+		quithere(1, "Failed to malloc");
 
 	sprintf(ret, "%s%s", ptr, s);
 	free(ptr);
@@ -1833,14 +1881,14 @@ void *str_text(char *ptr)
 		ret = strdup("(null)");
 
 		if (unlikely(!ret))
-			quit(1, "Failed to malloc in text_str null");
+			quithere(1, "Failed to malloc null");
 	}
 
 	uptr = (unsigned char *)ptr;
 
 	ret = txt = malloc(strlen(ptr)*4+5); // Guaranteed >= needed
 	if (unlikely(!txt))
-		quit(1, "Failed to malloc in text_str txt");
+		quithere(1, "Failed to malloc txt");
 
 	do {
 		if (*uptr < ' ' || *uptr > '~') {
@@ -1874,12 +1922,12 @@ void RenameThread(const char* name)
  * that support them and for apple which does not. We use a single byte across
  * a pipe to emulate semaphore behaviour there. */
 #ifdef __APPLE__
-void cgsem_init(cgsem_t *cgsem)
+void _cgsem_init(cgsem_t *cgsem, const char *file, const char *func, const int line)
 {
 	int flags, fd, i;
 
 	if (pipe(cgsem->pipefd) == -1)
-		quit(1, "Failed pipe in cgsem_init");
+		quitfrom(1, file, func, line, "Failed pipe errno=%d", errno);
 
 	/* Make the pipes FD_CLOEXEC to allow them to close should we call
 	 * execv on restart. */
@@ -1888,55 +1936,56 @@ void cgsem_init(cgsem_t *cgsem)
 		flags = fcntl(fd, F_GETFD, 0);
 		flags |= FD_CLOEXEC;
 		if (fcntl(fd, F_SETFD, flags) == -1)
-			quit(1, "Failed to fcntl in cgsem_init");
+			quitfrom(1, file, func, line, "Failed to fcntl errno=%d", errno);
 	}
 }
 
-void cgsem_post(cgsem_t *cgsem)
+void _cgsem_post(cgsem_t *cgsem, const char *file, const char *func, const int line)
 {
 	const char buf = 1;
 	int ret;
 
 	ret = write(cgsem->pipefd[1], &buf, 1);
 	if (unlikely(ret == 0))
-		applog(LOG_WARNING, "Failed to write in cgsem_post");
+		applog(LOG_WARNING, "Failed to write errno=%d" IN_FMT_FFL, errno, file, func, line);
 }
 
-void cgsem_wait(cgsem_t *cgsem)
+void _cgsem_wait(cgsem_t *cgsem, const char *file, const char *func, const int line)
 {
 	char buf;
 	int ret;
 
 	ret = read(cgsem->pipefd[0], &buf, 1);
 	if (unlikely(ret == 0))
-		applog(LOG_WARNING, "Failed to read in cgsem_wait");
+		applog(LOG_WARNING, "Failed to read errno=%d" IN_FMT_FFL, errno, file, func, line);
 }
 
-void cgsem_destroy(cgsem_t *cgsem)
+void _cgsem_destroy(cgsem_t *cgsem)
 {
 	close(cgsem->pipefd[1]);
 	close(cgsem->pipefd[0]);
 }
 #else
-void cgsem_init(cgsem_t *cgsem)
+void _cgsem_init(cgsem_t *cgsem, const char *file, const char *func, const int line)
 {
-	if (sem_init(cgsem, 0, 0))
-		quit(1, "Failed to sem_init in cgsem_init");
+	int ret;
+	if ((ret = sem_init(cgsem, 0, 0)))
+		quitfrom(1, file, func, line, "Failed to sem_init ret=%d errno=%d", ret, errno);
 }
 
-void cgsem_post(cgsem_t *cgsem)
+void _cgsem_post(cgsem_t *cgsem, const char *file, const char *func, const int line)
 {
 	if (unlikely(sem_post(cgsem)))
-		quit(1, "Failed to sem_post in cgsem_post");
+		quitfrom(1, file, func, line, "Failed to sem_post errno=%d cgsem=0x%p", errno, cgsem);
 }
 
-void cgsem_wait(cgsem_t *cgsem)
+void _cgsem_wait(cgsem_t *cgsem, const char *file, const char *func, const int line)
 {
 	if (unlikely(sem_wait(cgsem)))
-		quit(1, "Failed to sem_wait in cgsem_wait");
+		quitfrom(1, file, func, line, "Failed to sem_wait errno=%d cgsem=0x%p", errno, cgsem);
 }
 
-void cgsem_destroy(cgsem_t *cgsem)
+void _cgsem_destroy(cgsem_t *cgsem)
 {
 	sem_destroy(cgsem);
 }

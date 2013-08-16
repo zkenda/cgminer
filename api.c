@@ -134,7 +134,7 @@ static const char SEPARATOR = '|';
 #define SEPSTR "|"
 static const char GPUSEP = ',';
 
-static const char *APIVERSION = "1.26";
+static const char *APIVERSION = "1.28";
 static const char *DEAD = "Dead";
 #if defined(HAVE_OPENCL) || defined(HAVE_AN_FPGA) || defined(HAVE_AN_ASIC)
 static const char *SICK = "Sick";
@@ -413,6 +413,14 @@ static const char *JSON_PARAMETER = "parameter";
 #endif
 #define MSG_ASCUSBNODEV 115
 
+#ifdef HAVE_AN_ASIC
+#define MSG_MISASCOPT 116
+#define MSG_ASCNOSET 117
+#define MSG_ASCHELP 118
+#define MSG_ASCSETOK 119
+#define MSG_ASCSETERR 120
+#endif
+
 enum code_severity {
 	SEVERITY_ERR,
 	SEVERITY_WARN,
@@ -524,7 +532,7 @@ struct CODES {
  { SEVERITY_ERR,   MSG_MISVAL,	PARAM_NONE,	"Missing comma after GPU number" },
  { SEVERITY_ERR,   MSG_NOADL,	PARAM_NONE,	"ADL is not available" },
  { SEVERITY_ERR,   MSG_NOGPUADL,PARAM_GPU,	"GPU %d does not have ADL" },
- { SEVERITY_ERR,   MSG_INVINT,	PARAM_STR,	"Invalid intensity (%s) - must be '" _DYNAMIC  "' or range " _MIN_INTENSITY_STR " - " _MAX_INTENSITY_STR },
+ { SEVERITY_ERR,   MSG_INVINT,	PARAM_STR,	"Invalid intensity (%s) - must be '" _DYNAMIC  "' or range " MIN_SHA_INTENSITY_STR " - " MAX_SCRYPT_INTENSITY_STR },
  { SEVERITY_INFO,  MSG_GPUINT,	PARAM_BOTH,	"GPU %d set new intensity to %s" },
  { SEVERITY_SUCC,  MSG_MINECONFIG,PARAM_NONE,	"CGMiner config" },
 #ifdef HAVE_OPENCL
@@ -608,6 +616,11 @@ struct CODES {
  { SEVERITY_ERR,   MSG_ASCUNW,	PARAM_ASC,	"ASC %d is not flagged WELL, cannot enable" },
  { SEVERITY_SUCC,  MSG_ASCIDENT,PARAM_ASC,	"Identify command sent to ASC%d" },
  { SEVERITY_WARN,  MSG_ASCNOID,	PARAM_ASC,	"ASC%d does not support identify" },
+ { SEVERITY_ERR,   MSG_MISASCOPT, PARAM_NONE,	"Missing option after ASC number" },
+ { SEVERITY_WARN,  MSG_ASCNOSET, PARAM_ASC,	"ASC %d does not support pgaset" },
+ { SEVERITY_INFO,  MSG_ASCHELP, PARAM_BOTH,	"ASC %d set help: %s" },
+ { SEVERITY_SUCC,  MSG_ASCSETOK, PARAM_BOTH,	"ASC %d set OK" },
+ { SEVERITY_ERR,   MSG_ASCSETERR, PARAM_BOTH,	"ASC %d set failed: %s" },
 #endif
  { SEVERITY_FAIL, 0, 0, NULL }
 };
@@ -925,6 +938,7 @@ static struct api_data *api_add_data_full(struct api_data *root, char *name, enu
 			case API_FREQ:
 			case API_HS:
 			case API_DIFF:
+			case API_PERCENT:
 				api_data->data = (void *)malloc(sizeof(double));
 				*((double *)(api_data->data)) = *((double *)data);
 				break;
@@ -1056,6 +1070,11 @@ struct api_data *api_add_diff(struct api_data *root, char *name, double *data, b
 	return api_add_data_full(root, name, API_DIFF, (void *)data, copy_data);
 }
 
+struct api_data *api_add_percent(struct api_data *root, char *name, double *data, bool copy_data)
+{
+	return api_add_data_full(root, name, API_PERCENT, (void *)data, copy_data);
+}
+
 static struct api_data *print_data(struct api_data *root, char *buf, bool isjson, bool precom)
 {
 	struct api_data *tmp;
@@ -1147,6 +1166,9 @@ static struct api_data *print_data(struct api_data *root, char *buf, bool isjson
 				break;
 			case API_TEMP:
 				sprintf(buf, "%.2f", *((float *)(root->data)));
+				break;
+			case API_PERCENT:
+				sprintf(buf, "%.4f", *((double *)(root->data)) * 100.0);
 				break;
 			default:
 				applog(LOG_ERR, "API: unknown2 data type %d ignored", root->type);
@@ -1605,6 +1627,12 @@ static void gpustatus(struct io_data *io_data, int gpu, bool isjson, bool precom
 		root = api_add_diff(root, "Difficulty Rejected", &(cgpu->diff_rejected), false);
 		root = api_add_diff(root, "Last Share Difficulty", &(cgpu->last_share_diff), false);
 		root = api_add_time(root, "Last Valid Work", &(cgpu->last_device_valid_work), false);
+		double hwp = (cgpu->hw_errors + cgpu->diff1) ?
+				(double)(cgpu->hw_errors) / (double)(cgpu->hw_errors + cgpu->diff1) : 0;
+		root = api_add_percent(root, "Device Hardware%", &hwp, false);
+		double rejp = cgpu->diff1 ?
+				(double)(cgpu->diff_rejected) / (double)(cgpu->diff1) : 0;
+		root = api_add_percent(root, "Device Rejected%", &rejp, false);
 
 		root = print_data(root, buf, isjson, precom);
 		io_add(io_data, buf);
@@ -1678,6 +1706,12 @@ static void ascstatus(struct io_data *io_data, int asc, bool isjson, bool precom
 		root = api_add_bool(root, "No Device", &(cgpu->usbinfo.nodev), false);
 #endif
 		root = api_add_time(root, "Last Valid Work", &(cgpu->last_device_valid_work), false);
+		double hwp = (cgpu->hw_errors + cgpu->diff1) ?
+				(double)(cgpu->hw_errors) / (double)(cgpu->hw_errors + cgpu->diff1) : 0;
+		root = api_add_percent(root, "Device Hardware%", &hwp, false);
+		double rejp = cgpu->diff1 ?
+				(double)(cgpu->diff_rejected) / (double)(cgpu->diff1) : 0;
+		root = api_add_percent(root, "Device Rejected%", &rejp, false);
 
 		root = print_data(root, buf, isjson, precom);
 		io_add(io_data, buf);
@@ -1762,6 +1796,12 @@ static void pgastatus(struct io_data *io_data, int pga, bool isjson, bool precom
 		root = api_add_bool(root, "No Device", &(cgpu->usbinfo.nodev), false);
 #endif
 		root = api_add_time(root, "Last Valid Work", &(cgpu->last_device_valid_work), false);
+		double hwp = (cgpu->hw_errors + cgpu->diff1) ?
+				(double)(cgpu->hw_errors) / (double)(cgpu->hw_errors + cgpu->diff1) : 0;
+		root = api_add_percent(root, "Device Hardware%", &hwp, false);
+		double rejp = cgpu->diff1 ?
+				(double)(cgpu->diff_rejected) / (double)(cgpu->diff1) : 0;
+		root = api_add_percent(root, "Device Rejected%", &rejp, false);
 
 		root = print_data(root, buf, isjson, precom);
 		io_add(io_data, buf);
@@ -2132,6 +2172,12 @@ static void poolstatus(struct io_data *io_data, __maybe_unused SOCKETTYPE c, __m
 			root = api_add_const(root, "Stratum URL", BLANK, false);
 		root = api_add_bool(root, "Has GBT", &(pool->has_gbt), false);
 		root = api_add_uint64(root, "Best Share", &(pool->best_diff), true);
+		double rejp = (pool->diff_accepted + pool->diff_rejected + pool->diff_stale) ?
+				(double)(pool->diff_rejected) / (double)(pool->diff_accepted + pool->diff_rejected + pool->diff_stale) : 0;
+		root = api_add_percent(root, "Pool Rejected%", &rejp, false);
+		double stalep = (pool->diff_accepted + pool->diff_rejected + pool->diff_stale) ?
+				(double)(pool->diff_stale) / (double)(pool->diff_accepted + pool->diff_rejected + pool->diff_stale) : 0;
+		root = api_add_percent(root, "Pool Stale%", &stalep, false);
 
 		root = print_data(root, buf, isjson, isjson && (i > 0));
 		io_add(io_data, buf);
@@ -2178,6 +2224,18 @@ static void summary(struct io_data *io_data, __maybe_unused SOCKETTYPE c, __mayb
 	root = api_add_diff(root, "Difficulty Rejected", &(total_diff_rejected), true);
 	root = api_add_diff(root, "Difficulty Stale", &(total_diff_stale), true);
 	root = api_add_uint64(root, "Best Share", &(best_diff), true);
+	double hwp = (hw_errors + total_diff1) ?
+			(double)(hw_errors) / (double)(hw_errors + total_diff1) : 0;
+	root = api_add_percent(root, "Device Hardware%", &hwp, false);
+	double rejp = total_diff1 ?
+			(double)(total_diff_rejected) / (double)(total_diff1) : 0;
+	root = api_add_percent(root, "Device Rejected%", &rejp, false);
+	double prejp = (total_diff_accepted + total_diff_rejected + total_diff_stale) ?
+			(double)(total_diff_rejected) / (double)(total_diff_accepted + total_diff_rejected + total_diff_stale) : 0;
+	root = api_add_percent(root, "Pool Rejected%", &prejp, false);
+	double stalep = (total_diff_accepted + total_diff_rejected + total_diff_stale) ?
+			(double)(total_diff_stale) / (double)(total_diff_accepted + total_diff_rejected + total_diff_stale) : 0;
+	root = api_add_percent(root, "Pool Stale%", &stalep, false);
 
 	mutex_unlock(&hash_lock);
 
@@ -3681,6 +3739,66 @@ static void asccount(struct io_data *io_data, __maybe_unused SOCKETTYPE c, __may
 		io_close(io_data);
 }
 
+#ifdef HAVE_AN_ASIC
+static void ascset(struct io_data *io_data, __maybe_unused SOCKETTYPE c, __maybe_unused char *param, bool isjson, __maybe_unused char group)
+{
+	struct cgpu_info *cgpu;
+	struct device_drv *drv;
+	char buf[TMPBUFSIZ];
+	int numasc = numascs();
+
+	if (numasc == 0) {
+		message(io_data, MSG_ASCNON, 0, NULL, isjson);
+		return;
+	}
+
+	if (param == NULL || *param == '\0') {
+		message(io_data, MSG_MISID, 0, NULL, isjson);
+		return;
+	}
+
+	char *opt = strchr(param, ',');
+	if (opt)
+		*(opt++) = '\0';
+	if (!opt || !*opt) {
+		message(io_data, MSG_MISASCOPT, 0, NULL, isjson);
+		return;
+	}
+
+	int id = atoi(param);
+	if (id < 0 || id >= numasc) {
+		message(io_data, MSG_INVASC, id, NULL, isjson);
+		return;
+	}
+
+	int dev = ascdevice(id);
+	if (dev < 0) { // Should never happen
+		message(io_data, MSG_INVASC, id, NULL, isjson);
+		return;
+	}
+
+	cgpu = get_devices(dev);
+	drv = cgpu->drv;
+
+	char *set = strchr(opt, ',');
+	if (set)
+		*(set++) = '\0';
+
+	if (!drv->set_device)
+		message(io_data, MSG_ASCNOSET, id, NULL, isjson);
+	else {
+		char *ret = drv->set_device(cgpu, opt, set, buf);
+		if (ret) {
+			if (strcasecmp(opt, "help") == 0)
+				message(io_data, MSG_ASCHELP, id, ret, isjson);
+			else
+				message(io_data, MSG_ASCSETERR, id, ret, isjson);
+		} else
+			message(io_data, MSG_ASCSETOK, id, NULL, isjson);
+	}
+}
+#endif
+
 static void checkcommand(struct io_data *io_data, __maybe_unused SOCKETTYPE c, char *param, bool isjson, char group);
 
 struct CMDS {
@@ -3743,6 +3861,7 @@ struct CMDS {
 	{ "ascenable",		ascenable,	true },
 	{ "ascdisable",		ascdisable,	true },
 	{ "ascidentify",	ascidentify,	true },
+	{ "ascset",		ascset,		true },
 #endif
 	{ "asccount",		asccount,	false },
 	{ NULL,			NULL,		false }

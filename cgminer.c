@@ -56,6 +56,10 @@
 #include "driver-avalon.h"
 #endif
 
+#ifdef USE_BFLSC
+#include "driver-bflsc.h"
+#endif
+
 #if defined(unix) || defined(__APPLE__)
 	#include <errno.h>
 	#include <fcntl.h>
@@ -575,6 +579,13 @@ static char *set_int_0_to_100(const char *arg, int *i)
 }
 #endif
 
+#ifdef USE_BFLSC
+static char *set_int_0_to_200(const char *arg, int *i)
+{
+	return set_int_range(arg, i, 0, 200);
+}
+#endif
+
 static char *set_int_1_to_10(const char *arg, int *i)
 {
 	return set_int_range(arg, i, 1, 10);
@@ -954,6 +965,11 @@ static struct opt_table opt_config_table[] = {
 			opt_set_bool, &opt_bfl_noncerange,
 			"Use nonce range on bitforce devices if supported"),
 #endif
+#ifdef USE_BFLSC
+	OPT_WITH_ARG("--bflsc-overheat",
+		     set_int_0_to_200, opt_show_intval, &opt_bflsc_overheat,
+		     "Set overheat temperature where BFLSC devices throttle, 0 to disable"),
+#endif
 #ifdef HAVE_CURSES
 	OPT_WITHOUT_ARG("--compact",
 			opt_set_bool, &opt_compact,
@@ -1025,10 +1041,18 @@ static struct opt_table opt_config_table[] = {
 	OPT_WITH_ARG("--lookup-gap",
 		     set_lookup_gap, NULL, NULL,
 		     "Set GPU lookup gap for scrypt mining, comma separated"),
-#endif
 	OPT_WITH_ARG("--intensity|-I",
 		     set_intensity, NULL, NULL,
-		     "Intensity of GPU scanning (d or " _MIN_INTENSITY_STR " -> " _MAX_INTENSITY_STR ", default: d to maintain desktop interactivity)"),
+		     "Intensity of GPU scanning (d or " MIN_SHA_INTENSITY_STR
+		     " -> " MAX_SCRYPT_INTENSITY_STR
+		     ",default: d to maintain desktop interactivity)"),
+#else
+	OPT_WITH_ARG("--intensity|-I",
+		     set_intensity, NULL, NULL,
+		     "Intensity of GPU scanning (d or " MIN_SHA_INTENSITY_STR
+		     " -> " MAX_SHA_INTENSITY_STR
+		     ",default: d to maintain desktop interactivity)"),
+#endif
 #endif
 	OPT_WITH_ARG("--hotplug",
 		     set_int_0_to_9999, NULL, &hotplug_time,
@@ -1075,6 +1099,9 @@ static struct opt_table opt_config_table[] = {
 	OPT_WITH_ARG("--avalon-temp",
 		     set_int_0_to_100, opt_show_intval, &opt_avalon_temp,
 		     "Set avalon target temperature"),
+	OPT_WITH_ARG("--bitburner-voltage",
+		     opt_set_intval, NULL, &opt_bitburner_core_voltage,
+		     "Set BitBurner core voltage, in millivolts"),
 #endif
 	OPT_WITHOUT_ARG("--load-balance",
 		     set_loadbalance, &pool_strategy,
@@ -1523,9 +1550,8 @@ static struct work *make_work(void)
 void clean_work(struct work *work)
 {
 	free(work->job_id);
-	free(work->nonce2);
 	free(work->ntime);
-	free(work->gbt_coinbase);
+	free(work->coinbase);
 	free(work->nonce1);
 	memset(work, 0, sizeof(struct work));
 }
@@ -1536,33 +1562,6 @@ void free_work(struct work *work)
 {
 	clean_work(work);
 	free(work);
-}
-
-/* Generate a GBT coinbase from the existing GBT variables stored. Must be
- * entered under gbt_lock */
-static void __build_gbt_coinbase(struct pool *pool)
-{
-	unsigned char *coinbase;
-	int cbt_len, orig_len;
-	uint8_t *extra_len;
-	size_t cal_len;
-
-	cbt_len = strlen(pool->coinbasetxn) / 2;
-	pool->coinbase_len = cbt_len + 4;
-	/* We add 4 bytes of extra data corresponding to nonce2 of stratum */
-	cal_len = pool->coinbase_len + 1;
-	align_len(&cal_len);
-	coinbase = calloc(cal_len, 1);
-	hex2bin(coinbase, pool->coinbasetxn, 42);
-	extra_len = (uint8_t *)(coinbase + 41);
-	orig_len = *extra_len;
-	hex2bin(coinbase + 42, pool->coinbasetxn + 84, orig_len);
-	memcpy(coinbase + 42 + orig_len, &pool->nonce2, 4);
-	*extra_len += 4;
-	hex2bin(coinbase + 42 + *extra_len, pool->coinbasetxn + 84 + (orig_len * 2), cbt_len - orig_len - 42);
-	pool->nonce2++;
-	free(pool->gbt_coinbase);
-	pool->gbt_coinbase = coinbase;
 }
 
 static void gen_hash(unsigned char *data, unsigned char *hash, int len);
@@ -1625,7 +1624,7 @@ static unsigned char *__gbt_merkleroot(struct pool *pool)
 	if (unlikely(!merkle_hash))
 		quit(1, "Failed to calloc merkle_hash in __gbt_merkleroot");
 
-	gen_hash(pool->gbt_coinbase, merkle_hash, pool->coinbase_len);
+	gen_hash(pool->coinbase, merkle_hash, pool->coinbase_len);
 
 	if (pool->gbt_txns)
 		memcpy(merkle_hash + 32, pool->txn_hashes, pool->gbt_txns * 32);
@@ -1686,7 +1685,7 @@ static void update_gbt(struct pool *pool)
 	curl_easy_cleanup(curl);
 }
 
-static char *workpadding = "000000800000000000000000000000000000000000000000000000000000000000000000000000000000000080020000";
+char *workpadding = "000000800000000000000000000000000000000000000000000000000000000000000000000000000000000080020000";
 
 static void gen_gbt_work(struct pool *pool, struct work *work)
 {
@@ -1697,9 +1696,10 @@ static void gen_gbt_work(struct pool *pool, struct work *work)
 	if (now.tv_sec - pool->tv_lastwork.tv_sec > 60)
 		update_gbt(pool);
 
-	cg_ilock(&pool->gbt_lock);
-	__build_gbt_coinbase(pool);
-	cg_dlock(&pool->gbt_lock);
+	cg_wlock(&pool->gbt_lock);
+	memcpy(pool->coinbase + pool->nonce2_offset, &pool->nonce2, 4);
+	pool->nonce2++;
+	cg_dwlock(&pool->gbt_lock);
 	merkleroot = __gbt_merkleroot(pool);
 
 	memcpy(work->data, &pool->gbt_version, 4);
@@ -1709,7 +1709,7 @@ static void gen_gbt_work(struct pool *pool, struct work *work)
 
 	memcpy(work->target, pool->gbt_target, 32);
 
-	work->gbt_coinbase = bin2hex(pool->gbt_coinbase, pool->coinbase_len);
+	work->coinbase = bin2hex(pool->coinbase, pool->coinbase_len);
 
 	/* For encoding the block data on submission */
 	work->gbt_txns = pool->gbt_txns + 1;
@@ -1718,7 +1718,6 @@ static void gen_gbt_work(struct pool *pool, struct work *work)
 		work->job_id = strdup(pool->gbt_workid);
 	cg_runlock(&pool->gbt_lock);
 
-	memcpy(work->data + 4 + 32, merkleroot, 32);
 	flip32(work->data + 4 + 32, merkleroot);
 	free(merkleroot);
 	memset(work->data + 4 + 32 + 32 + 4 + 4, 0, 4); /* nonce */
@@ -1729,7 +1728,7 @@ static void gen_gbt_work(struct pool *pool, struct work *work)
 		char *header = bin2hex(work->data, 128);
 
 		applog(LOG_DEBUG, "Generated GBT header %s", header);
-		applog(LOG_DEBUG, "Work coinbase %s", work->gbt_coinbase);
+		applog(LOG_DEBUG, "Work coinbase %s", work->coinbase);
 		free(header);
 	}
 
@@ -1758,6 +1757,9 @@ static bool gbt_decode(struct pool *pool, json_t *res_val)
 	bool submitold;
 	const char *bits;
 	const char *workid;
+	int cbt_len, orig_len;
+	uint8_t *extra_len;
+	size_t cal_len;
 
 	previousblockhash = json_string_value(json_object_get(res_val, "previousblockhash"));
 	target = json_string_value(json_object_get(res_val, "target"));
@@ -1791,6 +1793,24 @@ static bool gbt_decode(struct pool *pool, json_t *res_val)
 	cg_wlock(&pool->gbt_lock);
 	free(pool->coinbasetxn);
 	pool->coinbasetxn = strdup(coinbasetxn);
+	cbt_len = strlen(pool->coinbasetxn) / 2;
+	pool->coinbase_len = cbt_len + 4;
+	/* We add 4 bytes of extra data corresponding to nonce2 of stratum */
+	cal_len = pool->coinbase_len + 1;
+	align_len(&cal_len);
+	free(pool->coinbase);
+	pool->coinbase = calloc(cal_len, 1);
+	if (unlikely(!pool->coinbase))
+		quit(1, "Failed to calloc pool coinbase in gbt_decode");
+	hex2bin(pool->coinbase, pool->coinbasetxn, 42);
+	extra_len = (uint8_t *)(pool->coinbase + 41);
+	orig_len = *extra_len;
+	hex2bin(pool->coinbase + 42, pool->coinbasetxn + 84, orig_len);
+	*extra_len += 4;
+	hex2bin(pool->coinbase + 42 + *extra_len, pool->coinbasetxn + 84 + (orig_len * 2),
+		cbt_len - orig_len - 42);
+	pool->nonce2_offset = orig_len + 42;
+
 	free(pool->longpollid);
 	pool->longpollid = strdup(longpollid);
 	free(pool->gbt_workid);
@@ -2247,9 +2267,16 @@ static void check_winsizes(void)
 	}
 }
 
-static void switch_logsize(void)
+static void disable_curses_windows(void);
+static void enable_curses_windows(void);
+
+static void switch_logsize(bool __maybe_unused newdevs)
 {
 	if (curses_active_locked()) {
+#ifdef WIN32
+		if (newdevs)
+			disable_curses_windows();
+#endif
 		if (opt_compact) {
 			logstart = devcursor + 1;
 			logcursor = logstart + 1;
@@ -2257,9 +2284,13 @@ static void switch_logsize(void)
 			logstart = devcursor + most_devices + 1;
 			logcursor = logstart + 1;
 		}
+#ifdef WIN32
+		if (newdevs)
+			enable_curses_windows();
+#endif
 		unlock_curses();
+		check_winsizes();
 	}
-	check_winsizes();
 }
 
 /* For mandatory printing when mutex is already locked */
@@ -2277,7 +2308,7 @@ void _wlogprint(const char *str)
 	}
 }
 #else
-static void switch_logsize(void)
+static void switch_logsize(bool __maybe_unused newdevs)
 {
 }
 #endif
@@ -2525,7 +2556,7 @@ static bool submit_upstream_work(struct work *work, CURL *curl, bool resubmit)
 		}
 		gbt_block = realloc_strcat(gbt_block, varint);
 		free(varint);
-		gbt_block = realloc_strcat(gbt_block, work->gbt_coinbase);
+		gbt_block = realloc_strcat(gbt_block, work->coinbase);
 
 		s = strdup("{\"id\": 0, \"method\": \"submitblock\", \"params\": [\"");
 		s = realloc_strcat(s, gbt_block);
@@ -2859,18 +2890,23 @@ static bool get_upstream_work(struct work *work, CURL *curl)
 }
 
 #ifdef HAVE_CURSES
+static void disable_curses_windows(void)
+{
+	leaveok(logwin, false);
+	leaveok(statuswin, false);
+	leaveok(mainwin, false);
+	nocbreak();
+	echo();
+	delwin(logwin);
+	delwin(statuswin);
+}
+
 static void disable_curses(void)
 {
 	if (curses_active_locked()) {
 		use_curses = false;
 		curses_active = false;
-		leaveok(logwin, false);
-		leaveok(statuswin, false);
-		leaveok(mainwin, false);
-		nocbreak();
-		echo();
-		delwin(logwin);
-		delwin(statuswin);
+		disable_curses_windows();
 		delwin(mainwin);
 		endwin();
 #ifdef WIN32
@@ -3147,12 +3183,10 @@ void __copy_work(struct work *work, struct work *base_work)
 		work->job_id = strdup(base_work->job_id);
 	if (base_work->nonce1)
 		work->nonce1 = strdup(base_work->nonce1);
-	if (base_work->nonce2)
-		work->nonce2 = strdup(base_work->nonce2);
 	if (base_work->ntime)
 		work->ntime = strdup(base_work->ntime);
-	if (base_work->gbt_coinbase)
-		work->gbt_coinbase = strdup(base_work->gbt_coinbase);
+	if (base_work->coinbase)
+		work->coinbase = strdup(base_work->coinbase);
 }
 
 /* Generates a copy of an existing work struct, creating fresh heap allocations
@@ -4416,7 +4450,7 @@ retry:
 		opt_compact = false;
 		want_per_device_stats = false;
 		wlogprint("Output mode reset to normal\n");
-		switch_logsize();
+		switch_logsize(false);
 		goto retry;
 	} else if (!strncasecmp(&input, "d", 1)) {
 		opt_debug ^= true;
@@ -4428,7 +4462,7 @@ retry:
 	} else if (!strncasecmp(&input, "m", 1)) {
 		opt_compact ^= true;
 		wlogprint("Compact mode %s\n", opt_compact ? "enabled" : "disabled");
-		switch_logsize();
+		switch_logsize(false);
 		goto retry;
 	} else if (!strncasecmp(&input, "p", 1)) {
 		want_per_device_stats ^= true;
@@ -5115,11 +5149,11 @@ static void *stratum_sthread(void *userdata)
 		quit(1, "Failed to create stratum_q in stratum_sthread");
 
 	while (42) {
+		char *noncehex, *nonce2, *nonce2hex;
 		struct stratum_share *sshare;
 		uint32_t *hash32, nonce;
 		struct work *work;
 		bool submitted;
-		char *noncehex;
 		char s[1024];
 
 		if (unlikely(pool->removed))
@@ -5145,10 +5179,18 @@ static void *stratum_sthread(void *userdata)
 		sshare->id = swork_id++;
 		mutex_unlock(&sshare_lock);
 
+		nonce2 = alloca(work->nonce2_len);
+		memset(nonce2, 0, work->nonce2_len);
+		memcpy(nonce2, &work->nonce2, sizeof(uint32_t));
+		nonce2hex = bin2hex((const unsigned char *)nonce2, work->nonce2_len);
+		if (unlikely(!nonce2hex))
+			quit(1, "Failed to bin2hex nonce2 in stratum_thread");
+
 		snprintf(s, sizeof(s),
 			"{\"params\": [\"%s\", \"%s\", \"%s\", \"%s\", \"%s\"], \"id\": %d, \"method\": \"mining.submit\"}",
-			pool->rpc_user, work->job_id, work->nonce2, work->ntime, noncehex, sshare->id);
+			pool->rpc_user, work->job_id, nonce2hex, work->ntime, noncehex, sshare->id);
 		free(noncehex);
+		free(nonce2hex);
 
 		applog(LOG_INFO, "Submitting share %08lx to pool %d",
 					(long unsigned int)htole32(hash32[6]), pool->pool_no);
@@ -5549,60 +5591,35 @@ void set_target(unsigned char *dest_target, double diff)
  * other means to detect when the pool has died in stratum_thread */
 static void gen_stratum_work(struct pool *pool, struct work *work)
 {
-	unsigned char *coinbase, merkle_root[32], merkle_sha[64];
-	char *header, *merkle_hash;
+	unsigned char merkle_root[32], merkle_sha[64];
 	uint32_t *data32, *swap32;
-	size_t alloc_len;
 	int i;
 
-	/* Use intermediate lock to update the one pool variable */
-	cg_ilock(&pool->data_lock);
+	cg_wlock(&pool->data_lock);
 
-	/* Generate coinbase */
-	work->nonce2 = bin2hex((const unsigned char *)&pool->nonce2, pool->n2size);
-	pool->nonce2++;
+	/* Update coinbase */
+	memcpy(pool->coinbase + pool->nonce2_offset, &pool->nonce2, sizeof(uint32_t));
+	work->nonce2 = pool->nonce2++;
+	work->nonce2_len = pool->n2size;
 
 	/* Downgrade to a read lock to read off the pool variables */
-	cg_dlock(&pool->data_lock);
-	alloc_len = pool->swork.cb_len;
-	align_len(&alloc_len);
-	coinbase = calloc(alloc_len, 1);
-	if (unlikely(!coinbase))
-		quit(1, "Failed to calloc coinbase in gen_stratum_work");
-	hex2bin(coinbase, pool->swork.coinbase1, pool->swork.cb1_len);
-	hex2bin(coinbase + pool->swork.cb1_len, pool->nonce1, pool->n1_len);
-	hex2bin(coinbase + pool->swork.cb1_len + pool->n1_len, work->nonce2, pool->n2size);
-	hex2bin(coinbase + pool->swork.cb1_len + pool->n1_len + pool->n2size, pool->swork.coinbase2, pool->swork.cb2_len);
+	cg_dwlock(&pool->data_lock);
 
 	/* Generate merkle root */
-	gen_hash(coinbase, merkle_root, pool->swork.cb_len);
-	free(coinbase);
+	gen_hash(pool->coinbase, merkle_root, pool->swork.cb_len);
 	memcpy(merkle_sha, merkle_root, 32);
 	for (i = 0; i < pool->swork.merkles; i++) {
-		unsigned char merkle_bin[32];
-
-		hex2bin(merkle_bin, pool->swork.merkle[i], 32);
-		memcpy(merkle_sha + 32, merkle_bin, 32);
+		memcpy(merkle_sha + 32, pool->swork.merkle_bin[i], 32);
 		gen_hash(merkle_sha, merkle_root, 64);
 		memcpy(merkle_sha, merkle_root, 32);
 	}
 	data32 = (uint32_t *)merkle_sha;
 	swap32 = (uint32_t *)merkle_root;
 	flip32(swap32, data32);
-	merkle_hash = bin2hex((const unsigned char *)merkle_root, 32);
 
-	header = calloc(pool->swork.header_len, 1);
-	if (unlikely(!header))
-		quit(1, "Failed to calloc header in gen_stratum_work");
-	snprintf(header, pool->swork.header_len,
-		"%s%s%s%s%s%s%s",
-		pool->swork.bbversion,
-		pool->swork.prev_hash,
-		merkle_hash,
-		pool->swork.ntime,
-		pool->swork.nbit,
-		"00000000", /* nonce */
-		workpadding);
+	/* Copy the data template from header_bin */
+	memcpy(work->data, pool->header_bin, 128);
+	memcpy(work->data + pool->merkle_offset, merkle_root, 32);
 
 	/* Store the stratum work diff to check it still matches the pool's
 	 * stratum diff when submitting shares */
@@ -5614,18 +5631,19 @@ static void gen_stratum_work(struct pool *pool, struct work *work)
 	work->ntime = strdup(pool->swork.ntime);
 	cg_runlock(&pool->data_lock);
 
-	applog(LOG_DEBUG, "Generated stratum merkle %s", merkle_hash);
-	applog(LOG_DEBUG, "Generated stratum header %s", header);
-	applog(LOG_DEBUG, "Work job_id %s nonce2 %s ntime %s", work->job_id, work->nonce2, work->ntime);
+	if (opt_debug) {
+		char *header, *merkle_hash;
 
-	free(merkle_hash);
+		header = bin2hex(work->data, 128);
+		merkle_hash = bin2hex((const unsigned char *)merkle_root, 32);
+		applog(LOG_DEBUG, "Generated stratum merkle %s", merkle_hash);
+		applog(LOG_DEBUG, "Generated stratum header %s", header);
+		applog(LOG_DEBUG, "Work job_id %s nonce2 %d ntime %s", work->job_id, work->nonce2, work->ntime);
+		free(header);
+		free(merkle_hash);
+	}
 
-	/* Convert hex data to binary data for work */
-	if (unlikely(!hex2bin(work->data, header, 128)))
-		quit(1, "Failed to convert header to data in gen_stratum_work");
-	free(header);
 	calc_midstate(work);
-
 	set_target(work->target, work->sdiff);
 
 	local_work++;
@@ -6037,6 +6055,19 @@ struct work *find_queued_work_bymidstate(struct cgpu_info *cgpu, char *midstate,
 
 	rd_lock(&cgpu->qlock);
 	ret = __find_work_bymidstate(cgpu->queued_work, midstate, midstatelen, data, offset, datalen);
+	rd_unlock(&cgpu->qlock);
+
+	return ret;
+}
+
+struct work *clone_queued_work_bymidstate(struct cgpu_info *cgpu, char *midstate, size_t midstatelen, char *data, int offset, size_t datalen)
+{
+	struct work *work, *ret = NULL;
+
+	rd_lock(&cgpu->qlock);
+	work = __find_work_bymidstate(cgpu->queued_work, midstate, midstatelen, data, offset, datalen);
+	if (work)
+		ret = copy_work(work);
 	rd_unlock(&cgpu->qlock);
 
 	return ret;
@@ -6983,16 +7014,10 @@ static void fork_monitor()
 #endif // defined(unix)
 
 #ifdef HAVE_CURSES
-void enable_curses(void) {
+static void enable_curses_windows(void)
+{
 	int x,y;
 
-	lock_curses();
-	if (curses_active) {
-		unlock_curses();
-		return;
-	}
-
-	mainwin = initscr();
 	getmaxyx(mainwin, y, x);
 	statuswin = newwin(logstart, x, 0, 0);
 	leaveok(statuswin, true);
@@ -7002,6 +7027,16 @@ void enable_curses(void) {
 	leaveok(logwin, true);
 	cbreak();
 	noecho();
+}
+void enable_curses(void) {
+	lock_curses();
+	if (curses_active) {
+		unlock_curses();
+		return;
+	}
+
+	mainwin = initscr();
+	enable_curses_windows();
 	curses_active = true;
 	statusy = logstart;
 	unlock_curses();
@@ -7168,11 +7203,8 @@ struct _cgpu_devid_counter {
 
 static void adjust_mostdevs(void)
 {
-// device window resize crashes on windows - disable resize now
-#ifndef WIN32
 	if (total_devices - zombie_devs > most_devices)
 		most_devices = total_devices - zombie_devs;
-#endif
 }
 
 bool add_cgpu(struct cgpu_info *cgpu)
@@ -7287,7 +7319,7 @@ static void hotplug_process()
 	}
 
 	adjust_mostdevs();
-	switch_logsize();
+	switch_logsize(true);
 }
 
 static void *hotplug_thread(void __maybe_unused *userdata)
@@ -7463,6 +7495,8 @@ int main(int argc, char *argv[])
 	if (opt_benchmark) {
 		struct pool *pool;
 
+		if (opt_scrypt)
+			quit(1, "Cannot use benchmark mode with scrypt");
 		pool = add_pool();
 		pool->rpc_url = malloc(255);
 		strcpy(pool->rpc_url, "Benchmark");
@@ -7615,12 +7649,7 @@ int main(int argc, char *argv[])
 		quit(1, "All devices disabled, cannot mine!");
 #endif
 
-// device window resize crashes on windows - disable resize now
-#ifdef WIN32
-	most_devices = total_devices + 1; // Allow space for 1 hotplug
-#else
 	most_devices = total_devices;
-#endif
 
 	load_temp_cutoffs();
 
